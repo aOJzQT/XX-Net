@@ -3,14 +3,26 @@
 
 
 import errno
+import time
+import struct
+import zlib
+import functools
+import re
+import io
 import xlog
+import string
+import threading
 import socket
 import ssl
+import Queue
+import BaseHTTPServer
+import httplib
 import urlparse
 
-import simple_http_server
+
 from cert_util import CertUtil
 from connect_manager import https_manager,forwork_manager
+from appids_manager import appid_manager
 
 import OpenSSL
 NetWorkIOError = (socket.error, ssl.SSLError, OpenSSL.SSL.Error, OSError)
@@ -22,19 +34,29 @@ import direct_handler
 from connect_control import connect_allow_time, connect_fail_time, touch_active
 import web_control
 
-
-class GAEProxyHandler(simple_http_server.HttpServerHandler):
+class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+    #protocol_version = 'HTTP/1.1'
     gae_support_methods = tuple(["GET", "POST", "HEAD", "PUT", "DELETE", "PATCH"])
     bufsize = 256*1024
     max_retry = 3
 
     def setup(self):
+        self.__class__.setup = BaseHTTPServer.BaseHTTPRequestHandler.setup
         self.__class__.do_GET = self.__class__.do_METHOD
         self.__class__.do_PUT = self.__class__.do_METHOD
         self.__class__.do_POST = self.__class__.do_METHOD
         self.__class__.do_HEAD = self.__class__.do_METHOD
         self.__class__.do_DELETE = self.__class__.do_METHOD
         self.__class__.do_OPTIONS = self.__class__.do_METHOD
+        self.setup()
+
+    def finish(self):
+        """make python2 BaseHTTPRequestHandler happy"""
+        try:
+            BaseHTTPServer.BaseHTTPRequestHandler.finish(self)
+        except NetWorkIOError as e:
+            if e[0] not in (errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE):
+                raise
 
     def address_string(self):
         return '%s:%s' % self.client_address[:2]
@@ -42,6 +64,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
     def forward_local(self):
         html = gae_handler.generate_message_html('Browser pass local request to proxy', u'您的浏览器把本地请求转发到代理上。<br>请在浏览器中设置：访问本地，不经过代理。<br><a href="https://github.com/XX-net/XX-Net/wiki/Browser-pass-localhost-request-to-proxy">帮助</a>')
         gae_handler.send_response(self.wfile, 200, body=html.encode('utf-8'))
+
 
     def do_METHOD(self):
         touch_active()
@@ -69,6 +92,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
 
         self.parsed_url = urlparse.urlparse(self.path)
 
+
         if host in config.HOSTS_GAE:
             return self.do_AGENT()
 
@@ -82,6 +106,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
             return self.wfile.write(('HTTP/1.1 301\r\nLocation: %s\r\n\r\n' % self.path.replace('http://', 'https://', 1)).encode())
 
         return self.do_AGENT()
+
 
     # Called by do_METHOD and do_CONNECT_AGENT
     def do_AGENT(self):
@@ -134,6 +159,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
         if host in config.HOSTS_FWD:
             return self.do_CONNECT_FWD()
 
+
         if host.endswith(config.HOSTS_GAE_ENDSWITH):
             return self.do_CONNECT_AGENT()
         if host.endswith(config.HOSTS_DIRECT_ENDSWITH):
@@ -152,6 +178,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
             connected_in_s = 5 # gae_proxy upload to appengine is slow, it need more 'fresh' connection.
         else:
             connected_in_s = 10  # gws connect can be used after tcp connection created 15 s
+
 
         try:
             self.wfile.write(b'HTTP/1.1 200 OK\r\n\r\n')
@@ -258,6 +285,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
 
             return self.do_AGENT()
 
+
         except NetWorkIOError as e:
             if e.args[0] not in (errno.ECONNABORTED, errno.ETIMEDOUT, errno.EPIPE):
                 raise
@@ -270,6 +298,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
                     pass
                 finally:
                     self.__realconnection = None
+
 
     def do_CONNECT_DIRECT(self):
         """deploy fake cert to client"""
@@ -347,6 +376,7 @@ class GAEProxyHandler(simple_http_server.HttpServerHandler):
                     return
 
             direct_handler.handler(self.command, host, path, request_headers, payload, self.wfile)
+
 
         except NetWorkIOError as e:
             if e.args[0] not in (errno.ECONNABORTED, errno.ETIMEDOUT, errno.EPIPE):
